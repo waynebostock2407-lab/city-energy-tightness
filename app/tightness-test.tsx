@@ -1,13 +1,7 @@
-import React, {
-  useEffect,
-  useState
-} from 'react'
+import React, { useState } from 'react'
 
 import {
-  evaluateTightnessTest
-} from '../logic/tightnessRules'
-
-import {
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -16,959 +10,568 @@ import {
   View
 } from 'react-native'
 
-import {
-  SafeAreaView
-} from 'react-native-safe-area-context'
-
-import QuestionToggle from '../components/QuestionToggle'
-
 import AsyncStorage from '@react-native-async-storage/async-storage'
+import { router } from 'expo-router'
+import { ArrowLeft, CheckCircle2, Gauge, TriangleAlert } from 'lucide-react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+
+import { edition4Matrix } from '../logic/edition4Rules'
 
 export default function TightnessTest() {
 
-  const [pressure, setPressure] =
-    useState('')
+  const [propertyReference, setPropertyReference] = useState('')
+  const [postcode, setPostcode] = useState('')
+  const [iv, setIv] = useState('')
+  const [pressureDrop, setPressureDrop] = useState('')
+  const [gaugeType, setGaugeType] = useState('Fluid')
+  const [result, setResult] = useState('')
+  const [actions, setActions] = useState<string[]>([])
+  const [allowableDrop, setAllowableDrop] = useState<number | null>(null)
+  const [saved, setSaved] = useState(false)
 
-  const [gasType, setGasType] =
-    useState('Natural Gas')
+  const perceptibleMovement =
+    gaugeType === 'Electronic' ? 0.20 : 0.25
 
-  const [result, setResult] =
-    useState('')
+  const installationVolume = Number(iv)
+  const measuredDrop = Number(pressureDrop)
 
-  const [guidance, setGuidance] =
-  useState('')
+  const matchingBand =
+    edition4Matrix.NG.find(
+      band =>
+        installationVolume > band.minIV &&
+        installationVolume <= band.maxIV
+    )
 
-  const [currentStep, setCurrentStep] =
-  useState(1)
+  function runAssessment() {
 
-  const [ecvClosed, setEcvClosed] =
-  useState<boolean | null>(null)
+    if (!iv || !pressureDrop) {
+      Alert.alert(
+        'Missing Information',
+        'Enter the Installation Volume and pressure drop.'
+      )
+      return
+    }
 
-  const [installationType, setInstallationType] =
-  useState('Meter Exchange')
+    if (
+      Number.isNaN(installationVolume) ||
+      Number.isNaN(measuredDrop)
+    ) {
+      Alert.alert(
+        'Invalid Information',
+        'Enter valid numerical values.'
+      )
+      return
+    }
 
-  const [appliancesConnected, setAppliancesConnected] =
-  useState<boolean | null>(null)
+    if (measuredDrop < 0) {
+      Alert.alert(
+        'Invalid Pressure Drop',
+        'Pressure drop cannot be negative.'
+      )
+      return
+    }
 
-  const [letByObserved, setLetByObserved] =
-  useState<boolean | null>(null)
+    if (measuredDrop <= perceptibleMovement) {
+      setResult('PASS')
+      setAllowableDrop(0)
+      setActions([
+        'No perceptible movement detected',
+        `Perceptible movement threshold: ${perceptibleMovement.toFixed(2)} mbar`,
+        'Installation considered gas tight'
+      ])
+      return
+    }
 
-  const [timerRunning, setTimerRunning] =
-  useState(false)
+    if (!matchingBand) {
+      setResult('FAIL')
+      setAllowableDrop(null)
+      setActions([
+        'Installation Volume is outside the supported Edition 4 range',
+        'Verify the Installation Volume calculation',
+        'Do not rely on this assessment until the Installation Volume has been verified'
+      ])
+      return
+    }
 
-const [timeRemaining, setTimeRemaining] =
-  useState(60)
+    setAllowableDrop(matchingBand.allowableDrop)
 
-useEffect(() => {
+    if (measuredDrop <= matchingBand.allowableDrop) {
+      setResult('WITHIN PERMISSIBLE LIMIT')
+      setActions([
+        'Pressure movement is above the perceptible movement threshold',
+        `Perceptible movement threshold: ${perceptibleMovement.toFixed(2)} mbar`,
+        'Pressure drop is within the applicable Installation Volume limit'
+      ])
+      return
+    }
 
-  let interval: any
-
-  if (
-    timerRunning &&
-    timeRemaining > 0
-  ) {
-
-    interval = setInterval(() => {
-
-      setTimeRemaining(prev => prev - 1)
-
-    }, 1000)
-
+    setResult('FAIL')
+    setActions([
+      'Pressure drop exceeds the applicable permissible limit',
+      'Trace and investigate the gas escape in accordance with the applicable procedure',
+      'Do not treat the installation as satisfactory'
+    ])
   }
-
-  if (timeRemaining === 0) {
-
-    setTimerRunning(false)
-
-  }
-
-  return () => clearInterval(interval)
-
-}, [timerRunning, timeRemaining])
-
-  function evaluateTest() {
 
   async function saveTest() {
 
-  const testRecord = {
+    if (!result) {
+      Alert.alert('No Result', 'Run the assessment before saving.')
+      return
+    }
 
-    installationType,
-    gasType,
-    pressure,
-    result,
-    guidance,
-    letByObserved,
-    appliancesConnected,
-    timestamp:
-      new Date().toISOString()
+    const assessment = {
+      propertyReference,
+      postcode,
+      testType: 'Tightness Test',
+      installationVolume: installationVolume.toFixed(4),
+      purgeVolume: (installationVolume * 1.5).toFixed(4),
+      pressureDrop: measuredDrop,
+      gaugeType,
+      result,
+      actions,
+      allowableDrop: allowableDrop ?? 0,
+      timestamp: new Date().toISOString()
+    }
 
+    const stored = await AsyncStorage.getItem('assessments')
+    const existing = stored ? JSON.parse(stored) : []
+
+    existing.unshift(assessment)
+
+    await AsyncStorage.setItem(
+      'assessments',
+      JSON.stringify(existing)
+    )
+
+    setSaved(true)
+
+    Alert.alert('Test Saved')
   }
 
-  const existingTests =
-    await AsyncStorage.getItem(
-      'tightnessTests'
-    )
-
-  const parsedTests =
-    existingTests
-      ? JSON.parse(existingTests)
-      : []
-
-  parsedTests.unshift(testRecord)
-
-  await AsyncStorage.setItem(
-    'tightnessTests',
-    JSON.stringify(parsedTests)
-  )
-
-}
-
-  const pressureValue =
-    Number(pressure)
-
-  const evaluation =
-    evaluateTightnessTest(
-      pressureValue,
-      ecvClosed,
-      letByObserved
-    )
-
-  setResult(evaluation.result)
-
-  setGuidance(evaluation.guidance)
-
-  saveTest()
-
-  if (
-  evaluation.result === 'FAIL'
-) {
-
-  setCurrentStep(4)
-
-} else if (
-  letByObserved === true
-) {
-
-  setCurrentStep(3)
-
-} else {
-
-  setCurrentStep(4)
-
-}
-
-}
-
-return (
-
+  return (
     <SafeAreaView style={styles.container}>
 
-      <ScrollView
-        contentContainerStyle={{
-          paddingBottom: 120
-        }}
-      >
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
 
         <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => router.back()}
+          >
+            <ArrowLeft size={22} color="#ffffff" />
+            <Text style={styles.backText}>Back</Text>
+          </TouchableOpacity>
 
-          <View style={styles.stepWrapper}>
+          <View style={styles.headerTitleRow}>
+            <Gauge size={28} color="#84cc16" />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.title}>Tightness Test</Text>
+              <Text style={styles.subtitle}>Edition 4 Pressure Drop Assessment</Text>
+            </View>
+          </View>
+        </View>
 
-  <View style={styles.stepContainer}>
+        <View style={styles.card}>
 
-    <View
-      style={[
-        styles.step,
-        currentStep >= 1 &&
-        styles.activeStep
-      ]}
-    />
+          <Text style={styles.sectionTitle}>Property</Text>
 
-    <View
-      style={[
-        styles.step,
-        currentStep >= 2 &&
-        styles.activeStep
-      ]}
-    />
+          <Text style={styles.label}>Property Reference</Text>
+          <TextInput
+            value={propertyReference}
+            onChangeText={setPropertyReference}
+            placeholder="Enter property reference"
+            placeholderTextColor="#6b7280"
+            style={styles.input}
+          />
 
-    <View
-      style={[
-        styles.step,
-        currentStep >= 3 &&
-        styles.activeStep
-      ]}
-    />
-
-    <View
-      style={[
-        styles.step,
-        currentStep >= 4 &&
-        styles.activeStep
-      ]}
-    />
-
-  </View>
-
-  <View style={styles.stepLabelRow}>
-
-    <Text style={styles.stepLabel}>
-      Checks
-    </Text>
-
-    <Text style={styles.stepLabel}>
-      Pressure
-    </Text>
-
-    <Text style={styles.stepLabel}>
-      Evaluate
-    </Text>
-
-    <Text style={styles.stepLabel}>
-      Result
-    </Text>
-
-  </View>
-
-</View>
-
-          <Text style={styles.title}>
-            Tightness Test
-          </Text>
-
-          <Text style={styles.subtitle}>
-            IGEM/UP/1B Guided Workflow
-          </Text>
+          <Text style={styles.label}>Postcode</Text>
+          <TextInput
+            value={postcode}
+            onChangeText={setPostcode}
+            placeholder="Enter postcode"
+            placeholderTextColor="#6b7280"
+            style={styles.input}
+            autoCapitalize="characters"
+          />
 
         </View>
 
         <View style={styles.card}>
-          
-          {currentStep === 1 && (
 
-  <View style={styles.card}>
+          <Text style={styles.sectionTitle}>Test Information</Text>
 
-    <Text style={styles.label}>
-      Installation Type
-    </Text>
-
-    <View style={styles.gasContainer}>
-
-      <TouchableOpacity
-        style={[
-          styles.gasButton,
-          installationType === 'Meter Exchange' &&
-          styles.selectedGas
-        ]}
-        onPress={() =>
-          setInstallationType('Meter Exchange')
-        }
-      >
-
-        <Text
-          style={[
-            styles.gasText,
-            installationType === 'Meter Exchange' &&
-            styles.selectedGasText
-          ]}
-        >
-          Exchange
-        </Text>
-
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        style={[
-          styles.gasButton,
-          installationType === 'New Install' &&
-          styles.selectedGas
-        ]}
-        onPress={() =>
-          setInstallationType('New Install')
-        }
-      >
-
-        <Text
-          style={[
-            styles.gasText,
-            installationType === 'New Install' &&
-            styles.selectedGasText
-          ]}
-        >
-          New
-        </Text>
-
-      </TouchableOpacity>
-
-    </View>
-
-    <QuestionToggle
-  label="Appliances Connected?"
-  value={appliancesConnected}
-  onChange={setAppliancesConnected}
-/>
-
-    <TouchableOpacity
-  style={[
-    styles.button,
-
-    appliancesConnected === null &&
-    styles.disabledButton
-  ]}
-  disabled={
-    appliancesConnected === null
-  }
-  onPress={() =>
-    setCurrentStep(2)
-  }
->
-
-      <Text style={styles.buttonText}>
-        Continue
-      </Text>
-
-    </TouchableOpacity>
-
-  </View>
-
-)}
-
-          {currentStep === 2 && (
-            <>
-
-          <View style={styles.timerCard}>
-
-  <Text style={styles.timerTitle}>
-    Stabilisation Timer
-  </Text>
-
-  <Text style={styles.timerValue}>
-    {timeRemaining}s
-  </Text>
-
-  <TouchableOpacity
-    style={styles.button}
-    onPress={() =>
-      setTimerRunning(true)
-    }
-  >
-
-    <Text style={styles.buttonText}>
-      Start Timer
-    </Text>
-
-  </TouchableOpacity>
-
-</View>
-
-          <Text style={styles.label}>
-            Operating Pressure (mbar)
-          </Text>
-
+          <Text style={styles.label}>Installation Volume (m³)</Text>
           <TextInput
-            value={pressure}
-            onChangeText={setPressure}
-            keyboardType="numeric"
-            placeholder="Enter pressure"
+            value={iv}
+            onChangeText={setIv}
+            keyboardType="decimal-pad"
+            placeholder="Enter Installation Volume"
+            placeholderTextColor="#6b7280"
             style={styles.input}
           />
 
-          <Text style={styles.label}>
-  ECV Confirmed Closed?
-</Text>
+          <Text style={styles.label}>Pressure Drop (mbar)</Text>
+          <TextInput
+            value={pressureDrop}
+            onChangeText={setPressureDrop}
+            keyboardType="decimal-pad"
+            placeholder="Enter pressure drop"
+            placeholderTextColor="#6b7280"
+            style={styles.input}
+          />
 
-<View style={styles.gasContainer}>
+          <Text style={styles.label}>Gauge Type</Text>
 
-  <TouchableOpacity
-    style={[
-      styles.gasButton,
-      ecvClosed === true &&
-      styles.selectedGas
-    ]}
-    onPress={() =>
-      setEcvClosed(true)
-    }
-  >
-
-    <Text
-      style={[
-        styles.gasText,
-        ecvClosed === true &&
-        styles.selectedGasText
-      ]}
-    >
-      YES
-    </Text>
-
-  </TouchableOpacity>
-
-  <TouchableOpacity
-    style={[
-      styles.gasButton,
-      ecvClosed === false &&
-      styles.selectedGas
-    ]}
-    onPress={() =>
-      setEcvClosed(false)
-    }
-  >
-
-    <Text
-      style={[
-        styles.gasText,
-        ecvClosed === false &&
-        styles.selectedGasText
-      ]}
-    >
-      NO
-    </Text>
-
-  </TouchableOpacity>
-
-</View>
-
-          <Text style={styles.label}>
-  Let-by Observed?
-</Text>
-
-<View style={styles.gasContainer}>
-
-  <TouchableOpacity
-    style={[
-      styles.gasButton,
-      letByObserved === true &&
-      styles.selectedGas
-    ]}
-    onPress={() =>
-      setLetByObserved(true)
-    }
-  >
-
-    <Text
-      style={[
-        styles.gasText,
-        letByObserved === true &&
-        styles.selectedGasText
-      ]}
-    >
-      YES
-    </Text>
-
-  </TouchableOpacity>
-
-  <TouchableOpacity
-    style={[
-      styles.gasButton,
-      letByObserved === false &&
-      styles.selectedGas
-    ]}
-    onPress={() =>
-      setLetByObserved(false)
-    }
-  >
-
-    <Text
-      style={[
-        styles.gasText,
-        letByObserved === false &&
-        styles.selectedGasText
-      ]}
-    >
-      NO
-    </Text>
-
-  </TouchableOpacity>
-
-</View>
-
-          <Text style={styles.label}>
-            Gas Type
-          </Text>
-
-          <View style={styles.gasContainer}>
-
+          <View style={styles.buttonRow}>
             <TouchableOpacity
               style={[
-                styles.gasButton,
-                gasType === 'Natural Gas' &&
-                styles.selectedGas
+                styles.choiceButton,
+                gaugeType === 'Fluid' && styles.choiceButtonSelected
               ]}
-              onPress={() =>
-                setGasType('Natural Gas')
-              }
+              onPress={() => setGaugeType('Fluid')}
             >
-
-              <Text
-                style={[
-                  styles.gasText,
-                  gasType === 'Natural Gas' &&
-                  styles.selectedGasText
-                ]}
-              >
-                NG
+              <Text style={[
+                styles.choiceText,
+                gaugeType === 'Fluid' && styles.choiceTextSelected
+              ]}>
+                Fluid
               </Text>
-
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[
-                styles.gasButton,
-                gasType === 'LPG' &&
-                styles.selectedGas
+                styles.choiceButton,
+                gaugeType === 'Electronic' && styles.choiceButtonSelected
               ]}
-              onPress={() =>
-                setGasType('LPG')
-              }
+              onPress={() => setGaugeType('Electronic')}
             >
-
-              <Text
-                style={[
-                  styles.gasText,
-                  gasType === 'LPG' &&
-                  styles.selectedGasText
-                ]}
-              >
-                LPG
+              <Text style={[
+                styles.choiceText,
+                gaugeType === 'Electronic' && styles.choiceTextSelected
+              ]}>
+                Electronic
               </Text>
-
             </TouchableOpacity>
-
           </View>
-
-          <TouchableOpacity
-            style={styles.button}
-            onPress={evaluateTest}
-          >
-
-            <Text style={styles.buttonText}>
-              Evaluate Test
-            </Text>
-
-          </TouchableOpacity>
-
-            </>
-
-              )}
 
         </View>
 
-        {ecvClosed === false && (
-
-  <View style={styles.criticalCard}>
-
-    <Text style={styles.criticalTitle}>
-      CRITICAL CHECK FAILED
-    </Text>
-
-    <Text style={styles.criticalText}>
-      Tightness testing cannot proceed until the ECV has been confirmed closed.
-    </Text>
-
-  </View>
-
-)}
-
-        <View style={styles.contextCard}>
-
-  <Text style={styles.contextTitle}>
-    Active Workflow
-  </Text>
-
-  <Text style={styles.contextValue}>
-    {installationType}
-  </Text>
-
-</View>
-
-        {appliancesConnected === true && (
-
-  <View style={styles.contextCard}>
-
-    <Text style={styles.contextTitle}>
-      Appliance Consideration
-    </Text>
-
-    <Text style={styles.contextValue}>
-      Additional appliance isolation and let-by considerations may apply.
-    </Text>
-
-  </View>
-
-)}
-
-{currentStep === 3 && (
-
-  <View style={styles.criticalCard}>
-
-    <Text style={styles.criticalTitle}>
-      Investigation Required
-    </Text>
-
-    <Text style={styles.criticalText}>
-      Potential let-by detected. Appliance isolation and additional integrity checks are recommended before proceeding.
-    </Text>
-
-    <TouchableOpacity
-      style={styles.button}
-      onPress={() =>
-        setCurrentStep(4)
-      }
-    >
-
-      <Text style={styles.buttonText}>
-        Continue Investigation
-      </Text>
-
-    </TouchableOpacity>
-
-  </View>
-
-)}
-
-{result !== '' && (
-
-  <View style={styles.summaryCard}>
-
-    <Text style={styles.summaryTitle}>
-      Test Summary
-    </Text>
-
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>
-        Installation
-      </Text>
-
-      <Text style={styles.summaryValue}>
-        {installationType}
-      </Text>
-    </View>
-
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>
-        Gas Type
-      </Text>
-
-      <Text style={styles.summaryValue}>
-        {gasType}
-      </Text>
-    </View>
-
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>
-        Pressure
-      </Text>
-
-      <Text style={styles.summaryValue}>
-        {pressure} mbar
-      </Text>
-    </View>
-
-    <View style={styles.summaryRow}>
-      <Text style={styles.summaryLabel}>
-        Let-by
-      </Text>
-
-      <Text style={styles.summaryValue}>
-        {letByObserved ? 'YES' : 'NO'}
-      </Text>
-    </View>
-
-  </View>
-
-)}
+        <View style={styles.thresholdCard}>
+          <Text style={styles.thresholdTitle}>PERCEPTIBLE MOVEMENT</Text>
+          <Text style={styles.thresholdValue}>
+            {perceptibleMovement.toFixed(2)} mbar
+          </Text>
+          <Text style={styles.thresholdText}>
+            {gaugeType === 'Fluid'
+              ? 'Maximum movement before perceptible movement is recorded for a Fluid gauge.'
+              : 'Maximum movement before perceptible movement is recorded for an Electronic gauge.'}
+          </Text>
+        </View>
 
         {result !== '' && (
+          <View style={[
+            styles.resultCard,
+            result === 'PASS'
+              ? styles.resultPass
+              : result === 'WITHIN PERMISSIBLE LIMIT'
+                ? styles.resultRetest
+                : styles.resultFail
+          ]}>
+            {result === 'FAIL'
+              ? <TriangleAlert size={30} color="#ef4444" />
+              : <CheckCircle2 size={30} color="#84cc16" />
+            }
 
-          <View style={styles.resultCard}>
+            <View style={styles.resultContent}>
+              <Text style={styles.resultTitle}>{result}</Text>
 
-            <Text style={styles.resultLabel}>
-              RESULT
-            </Text>
-
-            <Text
-  style={[
-    styles.resultValue,
-
-    result === 'PASS'
-      ? styles.passResult
-      : result === 'INVESTIGATE'
-      ? styles.investigateResult
-      : styles.failResult
-
-  ]}
->
-  {result}
-</Text>
-
-            <Text style={styles.guidanceText}>
-  {guidance}
-</Text>
+              {allowableDrop !== null && allowableDrop > 0 && (
+                <Text style={styles.resultMetric}>
+                  Applicable permissible limit: {allowableDrop} mbar
+                </Text>
+              )}
+            </View>
           </View>
+        )}
 
+        {actions.length > 0 && (
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Assessment</Text>
+
+            {actions.map((action, index) => (
+              <View key={index} style={styles.actionRow}>
+                <View style={styles.actionDot} />
+                <Text style={styles.actionText}>{action}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={styles.primaryButton}
+          onPress={runAssessment}
+        >
+          <Text style={styles.primaryButtonText}>Assess Pressure Drop</Text>
+        </TouchableOpacity>
+
+        {result !== '' && (
+          <TouchableOpacity
+            style={styles.secondaryButton}
+            onPress={saveTest}
+          >
+            <Text style={styles.secondaryButtonText}>
+              {saved ? 'Test Saved' : 'Save Test'}
+            </Text>
+          </TouchableOpacity>
         )}
 
       </ScrollView>
 
     </SafeAreaView>
-
   )
 }
 
 const styles = StyleSheet.create({
-
   container: {
     flex: 1,
-    backgroundColor: '#eef2f0'
+    backgroundColor: '#111827'
+  },
+
+  scrollContent: {
+    paddingBottom: 80
   },
 
   header: {
-    paddingTop: 40,
-    paddingHorizontal: 24,
-    paddingBottom: 20
+    backgroundColor: '#0f1720',
+    paddingHorizontal: 20,
+    paddingBottom: 22
+  },
+
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 12,
+    paddingBottom: 18
+  },
+
+  backText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '600'
+  },
+
+  headerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14
   },
 
   title: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: '#7fb343'
+    color: '#ffffff',
+    fontSize: 28,
+    fontWeight: '800'
   },
 
   subtitle: {
-    fontSize: 16,
-    color: '#6b7280',
-    marginTop: 8
+    color: '#9ca3af',
+    fontSize: 14,
+    marginTop: 4
   },
 
   card: {
-    backgroundColor: '#ffffff',
-    margin: 20,
+    backgroundColor: '#151f2b',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.07)',
+    marginHorizontal: 18,
+    marginTop: 18,
     padding: 20,
     borderRadius: 24
   },
 
+  sectionTitle: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 18
+  },
+
   label: {
-    fontSize: 16,
+    color: '#d1d5db',
+    fontSize: 14,
     fontWeight: '700',
-    marginBottom: 12
+    marginBottom: 8,
+    marginTop: 6
   },
 
   input: {
+    backgroundColor: '#0f1720',
     borderWidth: 1,
-    borderColor: '#d1d5db',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 24,
-    fontSize: 18
+    borderColor: 'rgba(255,255,255,0.09)',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 13,
+    color: '#ffffff',
+    fontSize: 16,
+    marginBottom: 14
   },
 
-  gasContainer: {
+  buttonRow: {
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 30
+    gap: 10,
+    marginTop: 2
   },
 
-  gasButton: {
-    backgroundColor: '#f3f4f6',
+  choiceButton: {
+    flex: 1,
+    backgroundColor: '#0f1720',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.09)',
+    borderRadius: 14,
     paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 16
+    alignItems: 'center'
   },
 
-  selectedGas: {
-    backgroundColor: '#7fb343'
+  choiceButtonSelected: {
+    backgroundColor: '#7fb343',
+    borderColor: '#7fb343'
   },
 
-  gasText: {
-    color: '#111827',
+  choiceText: {
+    color: '#d1d5db',
+    fontSize: 15,
     fontWeight: '700'
   },
 
-  selectedGasText: {
+  choiceTextSelected: {
     color: '#ffffff'
   },
 
-  button: {
-    backgroundColor: '#7fb343',
-    paddingVertical: 20,
-    borderRadius: 20,
-    alignItems: 'center'
+  thresholdCard: {
+    marginHorizontal: 18,
+    marginTop: 18,
+    padding: 20,
+    borderRadius: 24,
+    backgroundColor: 'rgba(127,179,67,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(127,179,67,0.35)'
   },
 
-  buttonText: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '700'
+  thresholdTitle: {
+    color: '#9ca3af',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 1
+  },
+
+  thresholdValue: {
+    color: '#84cc16',
+    fontSize: 30,
+    fontWeight: '900',
+    marginTop: 5
+  },
+
+  thresholdText: {
+    color: '#d1d5db',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 5
   },
 
   resultCard: {
-    backgroundColor: '#ffffff',
-    marginHorizontal: 20,
+    marginHorizontal: 18,
+    marginTop: 18,
+    padding: 20,
     borderRadius: 24,
-    padding: 30,
+    borderWidth: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14
+  },
+
+  resultPass: {
+    backgroundColor: 'rgba(127,179,67,0.12)',
+    borderColor: 'rgba(127,179,67,0.35)'
+  },
+
+  resultRetest: {
+    backgroundColor: 'rgba(234,179,8,0.10)',
+    borderColor: 'rgba(234,179,8,0.35)'
+  },
+
+  resultFail: {
+    backgroundColor: 'rgba(239,68,68,0.10)',
+    borderColor: 'rgba(239,68,68,0.35)'
+  },
+
+  resultContent: {
+    flex: 1
+  },
+
+  resultTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '900'
+  },
+
+  resultMetric: {
+    color: '#d1d5db',
+    fontSize: 14,
+    marginTop: 5
+  },
+
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12
+  },
+
+  actionDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#84cc16',
+    marginTop: 7,
+    marginRight: 10
+  },
+
+  actionText: {
+    flex: 1,
+    color: '#d1d5db',
+    fontSize: 14,
+    lineHeight: 21
+  },
+
+  primaryButton: {
+    backgroundColor: '#7fb343',
+    marginHorizontal: 18,
+    marginTop: 20,
+    paddingVertical: 16,
+    borderRadius: 16,
     alignItems: 'center'
   },
 
-  resultLabel: {
-    fontSize: 18,
-    color: '#6b7280',
-    marginBottom: 10
+  primaryButtonText: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: '800'
   },
 
-  resultValue: {
-    fontSize: 40,
-    fontWeight: '800',
-    color: '#7fb343'
+  secondaryButton: {
+    backgroundColor: '#151f2b',
+    borderWidth: 1,
+    borderColor: '#7fb343',
+    marginHorizontal: 18,
+    marginTop: 12,
+    paddingVertical: 15,
+    borderRadius: 16,
+    alignItems: 'center'
   },
 
-  guidanceText: {
-  marginTop: 20,
-  fontSize: 16,
-  color: '#374151',
-  textAlign: 'center',
-  lineHeight: 24
-},
-
-passResult: {
-  color: '#16a34a'
-},
-
-investigateResult: {
-  color: '#f59e0b'
-},
-
-failResult: {
-  color: '#dc2626'
-},
-
-criticalCard: {
-  backgroundColor: '#dc2626',
-  marginHorizontal: 20,
-  marginTop: 20,
-  borderRadius: 24,
-  padding: 24
-},
-
-criticalTitle: {
-  color: '#ffffff',
-  fontSize: 24,
-  fontWeight: '800',
-  marginBottom: 12
-},
-
-criticalText: {
-  color: '#ffffff',
-  fontSize: 16,
-  lineHeight: 24
-},
-
-stepContainer: {
-  flexDirection: 'row',
-  gap: 10,
-  marginBottom: 20
-},
-
-stepWrapper: {
-  marginBottom: 24
-},
-
-stepLabelRow: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  marginTop: 10
-},
-
-step: {
-  flex: 1,
-  height: 8,
-  backgroundColor: '#d1d5db',
-  borderRadius: 20
-},
-
-activeStep: {
-  backgroundColor: '#7fb343'
-},
-
-stepLabel: {
-  flex: 1,
-  fontSize: 11,
-  color: '#6b7280',
-  textAlign: 'center'
-},
-
-contextCard: {
-  backgroundColor: '#ffffff',
-  marginHorizontal: 20,
-  marginTop: 20,
-  borderRadius: 24,
-  padding: 20
-},
-
-contextTitle: {
-  fontSize: 16,
-  color: '#6b7280',
-  marginBottom: 10
-},
-
-contextValue: {
-  fontSize: 24,
-  fontWeight: '700',
-  color: '#7fb343'
-},
-
-timerCard: {
-  backgroundColor: '#ffffff',
-  marginBottom: 24,
-  borderRadius: 24,
-  padding: 20,
-  alignItems: 'center'
-},
-
-timerTitle: {
-  fontSize: 18,
-  fontWeight: '700',
-  marginBottom: 12
-},
-
-timerValue: {
-  fontSize: 48,
-  fontWeight: '800',
-  color: '#7fb343',
-  marginBottom: 20
-},
-
-summaryCard: {
-  backgroundColor: '#ffffff',
-  marginHorizontal: 20,
-  marginTop: 20,
-  borderRadius: 24,
-  padding: 24
-},
-
-summaryTitle: {
-  fontSize: 24,
-  fontWeight: '800',
-  marginBottom: 20,
-  color: '#111827'
-},
-
-summaryRow: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  marginBottom: 16
-},
-
-summaryLabel: {
-  fontSize: 16,
-  color: '#6b7280'
-},
-
-summaryValue: {
-  fontSize: 16,
-  fontWeight: '700',
-  color: '#111827'
-},
-
-disabledButton: {
-  opacity: 0.4
-},
-
+  secondaryButtonText: {
+    color: '#84cc16',
+    fontSize: 16,
+    fontWeight: '800'
+  }
 })

@@ -138,7 +138,7 @@ export default function HomeScreen() {
   <TouchableOpacity
     style={styles.actionCard}
     onPress={() =>
-      router.push('/edition4-check')
+      router.push('/new-test')
     }
   >
 
@@ -149,7 +149,7 @@ export default function HomeScreen() {
     />
 
     <Text style={styles.actionCardText}>
-      New Assessment
+      New Test
     </Text>
 
   </TouchableOpacity>
@@ -168,7 +168,7 @@ export default function HomeScreen() {
     />
 
     <Text style={styles.actionCardText}>
-      Saved Assessments
+      Saved Tests
     </Text>
 
   </TouchableOpacity>
