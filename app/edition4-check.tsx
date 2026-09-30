@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Flame,
   Gauge,
+  RefreshCw,
   TriangleAlert,
   Workflow,
   Wrench
@@ -178,6 +179,11 @@ const [
   setMeterExchanged
 ] = useState(false)
 
+const [
+  exchangeStarted,
+  setExchangeStarted
+] = useState(false)
+
   const [
     selectedMeter,
     setSelectedMeter
@@ -226,6 +232,26 @@ const [
   preExchangeIV,
   setPreExchangeIV
 ] = useState(0)
+
+const [
+  preExchangeResult,
+  setPreExchangeResult
+] = useState('')
+
+const [
+  preExchangeActions,
+  setPreExchangeActions
+] = useState<string[]>([])
+
+const [
+  preExchangeAllowableDrop,
+  setPreExchangeAllowableDrop
+] = useState(0)
+
+const [
+  preExchangeBandText,
+  setPreExchangeBandText
+] = useState('')
 
   const [
     result,
@@ -374,19 +400,21 @@ const postExchangeIV =
 const postExchangePurgeVolume =
   postExchangeIV * 1.5  
 
-const assessmentIV =
-  testStage === 'preExchange'
-    ? iv
-    : postExchangeIV
+const assessmentIV = iv
 
-const assessmentPurgeVolume =
-  assessmentIV * 1.5
+const assessmentPurgeVolume = iv * 1.5
 
-const matchingBand =
+const matchingBand = edition4Matrix.NG.find(
+  band =>
+    iv > band.minIV &&
+    iv <= band.maxIV
+)
+
+const preMatchingBand =
   edition4Matrix.NG.find(
     band =>
-      assessmentIV > band.minIV &&
-      assessmentIV <= band.maxIV
+      (preExchangeResult ? preExchangeIV : iv) > band.minIV &&
+      (preExchangeResult ? preExchangeIV : iv) <= band.maxIV
   )
 
   async function runAssessment() {
@@ -435,13 +463,53 @@ const matchingBand =
     )
     setPreExchangeIV(iv)
 
-    setResult('PRE-EXCHANGE TEST RECORDED')
+    const numericPressureDrop = Number(currentPressureDrop)
+    const perceptibleMovement =
+      gaugeType === 'Electronic' ? 0.2 : 0.25
 
-    setActions([
+    const evaluation =
+      evaluateEdition4(
+        assessmentIV,
+        numericPressureDrop,
+        true,
+        gaugeType
+      )
+
+    // Edition 4 treats a pressure drop at or below the gauge's
+    // perceptible-movement threshold as no perceptible movement.
+    // Make that explicit here so a 0.0 mbar entry can never fall
+    // through to the pressure-loss result.
+    const preResult =
+      numericPressureDrop <= perceptibleMovement
+        ? 'PRE-EXCHANGE TEST SATISFACTORY'
+        : evaluation.result === 'PASS'
+          ? 'PRE-EXCHANGE TEST SATISFACTORY'
+          : evaluation.result
+
+    const preActions = [
       'Pre-exchange tightness test recorded',
+      ...evaluation.actions,
       'Proceed with meter exchange',
       'After meter exchange, carry out the post-exchange tightness test'
-    ])
+    ]
+
+    const preBandText =
+      evaluation.bandMax > 0
+        ? `${evaluation.bandMin.toFixed(3)} - ${evaluation.bandMax.toFixed(3)} m³`
+        : ''
+
+    setPreExchangeResult(preResult)
+    setPreExchangeActions(preActions)
+    setPreExchangeAllowableDrop(evaluation.allowableDrop)
+    setPreExchangeBandText(preBandText)
+
+    setResult(preResult)
+    setActions(preActions)
+    setAllowableDrop(evaluation.allowableDrop)
+    setBandText(preBandText)
+
+    // Do not automatically open the meter-exchange section.
+    // The engineer explicitly proceeds after reviewing the result.
 
     return
   }
@@ -462,7 +530,7 @@ const matchingBand =
 
     const evaluation =
       evaluateEdition4(
-        assessmentIV,
+        postExchangeIV,
         Number(currentPressureDrop),
         true,
         gaugeType
@@ -479,13 +547,7 @@ const matchingBand =
             'Isolate all appliances',
             'Repeat the tightness test on pipework only'
           ]
-        : evaluation.result === 'PASS'
-          ? [
-              'No pressure drop detected following meter exchange',
-              'Complete job as BAU',
-              'Refer to Calculator for Purge Volume'
-            ]
-          : evaluation.actions
+        : evaluation.actions
     )
 
     setAllowableDrop(
@@ -507,7 +569,7 @@ const matchingBand =
 
     const evaluation =
       evaluateEdition4(
-        assessmentIV,
+        postExchangeIV,
         Number(currentPressureDrop),
         false,
         gaugeType
@@ -518,10 +580,10 @@ const matchingBand =
     setActions(
       evaluation.result === 'PASS'
         ? [
-            'Final tightness test satisfactory',
-            'Apply LDF to all isolation valves',
-            'Complete job as BAU',
-            'Refer to Calculator for Purge Volume'
+            'No perceptible movement detected on pipework-only test',
+            'Pipework test satisfactory',
+            'Reinstate appliances',
+            'Carry out final tightness test'
           ]
         : evaluation.actions
     )
@@ -539,28 +601,81 @@ const matchingBand =
 
   /*
    * FINAL TEST AFTER APPLIANCES ARE REINSTATED
+   *
+   * The pipework-only retest has already established that the
+   * installation pipework is tight. The final test is therefore
+   * the close-out test after appliances are reinstated.
+   *
+   * Do not send a final-test result back into the pipework-only
+   * retest loop. If the final reading is within the applicable
+   * permissible limit, the job can be completed. If it exceeds
+   * the limit, the installation must not be closed out.
    */
 
   if (testStage === 'finalTest') {
 
-    const evaluation =
-      evaluateEdition4(
-        assessmentIV,
-        Number(currentPressureDrop),
-        true,
-        gaugeType
+    const numericPressureDrop =
+      Number(currentPressureDrop)
+
+    const perceptibleMovement =
+      gaugeType === 'Electronic' ? 0.2 : 0.25
+
+    const finalMatchingBand =
+      edition4Matrix.NG.find(
+        band =>
+          postExchangeIV > band.minIV &&
+          postExchangeIV <= band.maxIV
       )
 
-    setResult(evaluation.result)
+    if (!finalMatchingBand) {
+      setResult('FAIL')
+      setActions([
+        'Installation Volume outside supported range',
+        'Do not close out the installation',
+        'Follow the controlled investigation and isolation process'
+      ])
+      setAllowableDrop(0)
+      setBandText('')
+      return
+    }
 
-    setActions(evaluation.actions)
+    if (numericPressureDrop <= perceptibleMovement) {
+      setResult('PASS')
+      setActions([
+        'Final tightness test satisfactory',
+        'Appliances reinstated',
+        'Apply LDF to all disturbed joints and isolation valves',
+        'Confirm there is no smell of gas',
+        'Complete the test record'
+      ])
+    } else if (
+      numericPressureDrop <=
+      finalMatchingBand.allowableDrop
+    ) {
+      setResult('PASS')
+      setActions([
+        'Final tightness test completed',
+        'Pressure movement is within the applicable permissible limit',
+        'Pipework-only retest has already confirmed the installation pipework is tight',
+        'Apply LDF to all disturbed joints and isolation valves',
+        'Confirm there is no smell of gas',
+        'Complete the test record'
+      ])
+    } else {
+      setResult('FAIL')
+      setActions([
+        'Final pressure drop exceeds the applicable permissible limit',
+        'Do not close out the installation',
+        'Follow the controlled investigation, rectification and retest process'
+      ])
+    }
 
     setAllowableDrop(
-      evaluation.allowableDrop
+      finalMatchingBand.allowableDrop
     )
 
     setBandText(
-      `${evaluation.bandMin.toFixed(3)} - ${evaluation.bandMax.toFixed(3)} m³`
+      `${finalMatchingBand.minIV.toFixed(3)} - ${finalMatchingBand.maxIV.toFixed(3)} m³`
     )
 
     return
@@ -595,6 +710,10 @@ notes,
     purgeVolume.toFixed(4),
 
       preExchangeIV,
+preExchangeResult,
+preExchangeActions,
+preExchangeAllowableDrop,
+preExchangeBandText,
 preExchangePipeworkIV: pipeworkIV,
 preExchangeMeterIV: meterIV,
 existingMeter,
@@ -675,6 +794,7 @@ setPostExchangePressureDrop('')
 setPipeworkRetestPressureDrop('')
 setFinalTestPressureDrop('')
 setMeterExchanged(false)
+setExchangeStarted(false)
 
 setExistingMeter('G4 / U6')
 setExistingPipeSegments([])
@@ -688,6 +808,10 @@ setNewPipeSegments([
   }
 ])
 setPreExchangeIV(0)
+setPreExchangeResult('')
+setPreExchangeActions([])
+setPreExchangeAllowableDrop(0)
+setPreExchangeBandText('')
 
     setPipeSegments([
       {
@@ -700,32 +824,133 @@ setPreExchangeIV(0)
 
   }
 
+  function renderResultCard(
+    resultValue: string,
+    actionList: string[],
+    allowableValue: number,
+    bandValue: string
+  ) {
+    const isPass =
+      resultValue === 'PASS' ||
+      resultValue === 'PRE-EXCHANGE TEST SATISFACTORY'
+
+    return (
+      <View
+        style={[
+          styles.card,
+          isPass
+            ? styles.resultCardPass
+            : resultValue === 'RETEST REQUIRED'
+              ? styles.resultCardRetest
+              : styles.resultCardFail
+        ]}
+      >
+        <View style={styles.resultHeader}>
+          {isPass ? (
+            <CheckCircle2
+              size={34}
+              color="#16a34a"
+              style={{ marginRight: 10 }}
+            />
+          ) : resultValue === 'RETEST REQUIRED' ? (
+            <Wrench
+              size={34}
+              color="#d97706"
+              style={{ marginRight: 10 }}
+            />
+          ) : (
+            <TriangleAlert
+              size={34}
+              color="#dc2626"
+              style={{ marginRight: 10 }}
+            />
+          )}
+
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text
+              style={[
+                styles.resultText,
+                isPass
+                  ? styles.passText
+                  : resultValue === 'RETEST REQUIRED'
+                    ? styles.retestText
+                    : styles.failText
+              ]}
+            >
+              {resultValue}
+            </Text>
+
+            <View
+              style={[
+                styles.statusPill,
+                isPass
+                  ? styles.statusPillPass
+                  : resultValue === 'RETEST REQUIRED'
+                    ? styles.statusPillRetest
+                    : styles.statusPillFail
+              ]}
+            >
+              <Text style={styles.statusPillText}>
+                {resultValue === 'PRE-EXCHANGE TEST SATISFACTORY'
+                  ? 'Pre-Exchange Test Satisfactory'
+                  : resultValue === 'PASS'
+                    ? 'Installation Sound'
+                    : resultValue === 'RETEST REQUIRED'
+                      ? 'Retest Required'
+                      : 'Pressure Loss Exceeds Limits'}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {allowableValue > 0 && (
+          <View style={styles.infoCard}>
+            <Text style={styles.infoText}>
+              Permissible Limit: {allowableValue} mbar
+            </Text>
+            <Text style={styles.infoText}>
+              IV Band: {bandValue}
+            </Text>
+          </View>
+        )}
+
+        <View style={styles.actionsCard}>
+          {actionList.map((action, index) => (
+            <View key={index} style={styles.actionRow}>
+              <View style={styles.actionIcon}>
+                <ChevronRight
+                  size={18}
+                  color="#7fb343"
+                  style={{ marginRight: 10 }}
+                />
+              </View>
+              <Text style={styles.actionText}>{action}</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    )
+  }
+
   return (
 
     <SafeAreaView style={styles.container}>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: 120 }}
       >
 
         <View style={styles.header}>
+          <Image
+            source={require('../assets/images/IVAssistHeader.png')}
+            style={styles.brandHeader}
+            resizeMode="cover"
+          />
+        </View>
 
-  <Image
-
-    source={
-      require('../assets/images/IVAssistHeader.png')
-    }
-
-    style={styles.brandHeader}
-
-    resizeMode="cover"
-
-  />
-
-</View>
-
+        {/* PROPERTY DETAILS */}
         <View style={styles.card}>
-
           <TextInput
             placeholder="First line of address"
             placeholderTextColor="#9ca3af"
@@ -738,361 +963,435 @@ setPreExchangeIV(0)
             placeholder="Postcode"
             placeholderTextColor="#9ca3af"
             value={postcode}
-            onChangeText={text =>
-              setPostcode(
-                text.toUpperCase()
-              )
-            }
+            onChangeText={text => setPostcode(text.toUpperCase())}
             autoCapitalize="characters"
             style={styles.input}
           />
-
         </View>
 
+        {/* EXISTING INSTALLATION PIPEWORK */}
         <View style={styles.card}>
-
           <View style={styles.sectionHeader}>
-
-  <Workflow
-    size={22}
-    color="#7fb343"
-    style={{ marginRight: 10 }}
-  />
-
-  <Text style={styles.sectionTitle}>
-    Pipework
-  </Text>
-
-</View>
-
-<Text style={styles.pipeworkNote}>
-  *Fittings volume automatically calculated based on pipe segments added*
-</Text>
-
-          {pipeSegments.map(
-            (segment, index) => (
-
-              <View
-  key={segment.id}
-  style={styles.segmentRowCompact}
->
-
-  <View style={styles.segmentTopRow}>
-
-    <Picker
-
-      selectedValue={segment.material}
-
-      style={styles.materialPicker}
-
-      mode="dropdown"
-
-      dropdownIconColor="#ffffff"
-
-      onValueChange={value => {
-
-  const updated = [...pipeSegments]
-
-  updated[index] = {
-
-    ...updated[index],
-
-    material: value,
-
-    diameter:
-      value === 'Copper'
-        ? '15mm'
-        : '½"'
-
-  }
-
-  setPipeSegments(updated)
-
-}}
-
-    >
-
-      <Picker.Item
-        label="Copper"
-        value="Copper"
-      />
-
-      <Picker.Item
-        label="Steel"
-        value="Steel"
-      />
-
-    </Picker>
-
-    <Picker
-
-      selectedValue={segment.diameter}
-
-      style={styles.pipePicker}
-
-      mode="dropdown"
-
-      dropdownIconColor="#ffffff"
-
-      onValueChange={value =>
-
-        updatePipeSegment(
-          index,
-          'diameter',
-          value
-        )
-
-      }
-
-    >
-
-      {
-        pipeSizes
-          .filter(
-
-            pipe =>
-
-              pipe.material ===
-              segment.material
-
-          )
-          .map(pipe => (
-
-            <Picker.Item
-              key={pipe.label}
-              label={pipe.label}
-              value={pipe.label}
+            <Workflow
+              size={22}
+              color="#7fb343"
+              style={{ marginRight: 10 }}
             />
+            <Text style={styles.sectionTitle}>
+              Existing Installation Pipework
+            </Text>
+          </View>
 
-          ))
-      }
+          <Text style={styles.pipeworkNote}>
+            *Fittings volume automatically calculated based on pipe segments added*
+          </Text>
 
-    </Picker>
+          {pipeSegments.map((segment, index) => (
+            <View key={segment.id} style={styles.segmentRowCompact}>
+              <View style={styles.segmentTopRow}>
+                <Picker
+                  selectedValue={segment.material}
+                  style={styles.materialPicker}
+                  mode="dropdown"
+                  dropdownIconColor="#ffffff"
+                  onValueChange={value => {
+                    const updated = [...pipeSegments]
+                    updated[index] = {
+                      ...updated[index],
+                      material: value,
+                      diameter: value === 'Copper' ? '15mm' : '½"'
+                    }
+                    setPipeSegments(updated)
+                  }}
+                >
+                  <Picker.Item label="Copper" value="Copper" />
+                  <Picker.Item label="Steel" value="Steel" />
+                </Picker>
 
-  </View>
+                <Picker
+                  selectedValue={segment.diameter}
+                  style={styles.pipePicker}
+                  mode="dropdown"
+                  dropdownIconColor="#ffffff"
+                  onValueChange={value =>
+                    updatePipeSegment(index, 'diameter', value)
+                  }
+                >
+                  {pipeSizes
+                    .filter(pipe => pipe.material === segment.material)
+                    .map(pipe => (
+                      <Picker.Item
+                        key={pipe.label}
+                        label={pipe.label}
+                        value={pipe.label}
+                      />
+                    ))}
+                </Picker>
+              </View>
 
-  <View style={styles.segmentBottomRow}>
+              <View style={styles.segmentBottomRow}>
+                <TextInput
+                  value={segment.length}
+                  onChangeText={text =>
+                    updatePipeSegment(index, 'length', text)
+                  }
+                  style={styles.lengthInputFull}
+                  placeholder="Length (m)"
+                  placeholderTextColor="#9ca3af"
+                  keyboardType="numeric"
+                />
 
-    <TextInput
-
-      value={segment.length}
-
-      onChangeText={text =>
-        updatePipeSegment(
-          index,
-          'length',
-          text
-        )
-      }
-
-      style={styles.lengthInputFull}
-
-      placeholder="Length (m)"
-
-      placeholderTextColor="#9ca3af"
-
-      keyboardType="numeric"
-
-    />
-
-    <TouchableOpacity
-
-      style={styles.removeCompact}
-
-      onPress={() => {
-
-        const updated =
-          pipeSegments.filter(
-            (_, pipeIndex) =>
-              pipeIndex !== index
-          )
-
-        setPipeSegments(updated)
-
-      }}
-
-    >
-
-      <Text style={styles.removeCompactText}>
-        ✕
-      </Text>
-
-    </TouchableOpacity>
-
-  </View>
-
-</View>
-
-            )
-          )}
+                <TouchableOpacity
+                  style={styles.removeCompact}
+                  onPress={() => {
+                    const updated = pipeSegments.filter(
+                      (_, pipeIndex) => pipeIndex !== index
+                    )
+                    setPipeSegments(updated)
+                  }}
+                >
+                  <Text style={styles.removeCompactText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
 
           <TouchableOpacity
             style={styles.addButton}
             onPress={addPipeSegment}
           >
-
-            <Text style={styles.addButtonText}>
-              Add Pipe Segment
-            </Text>
-
+            <Text style={styles.addButtonText}>Add Pipe Segment</Text>
           </TouchableOpacity>
-
         </View>
 
+        {/* EXISTING METER */}
         <View style={styles.card}>
-
-          <Text style={styles.sectionTitle}>
-            Meter Type
-          </Text>
+          <View style={styles.sectionHeader}>
+            <Gauge size={22} color="#7fb343" style={{ marginRight: 10 }} />
+            <Text style={styles.sectionTitle}>Existing Meter</Text>
+          </View>
 
           {meters.map(meter => (
-
             <TouchableOpacity
               key={meter.label}
-              disabled={testStage !== 'preExchange'}
+              disabled={!!preExchangeResult}
               style={[
                 styles.meterButton,
-                selectedMeter === meter.label &&
-                styles.selectedMeterButton,
-                testStage !== 'preExchange' && {
-                  opacity: 0.55
-                }
+                selectedMeter === meter.label && styles.selectedMeterButton,
+                preExchangeResult && { opacity: 0.55 }
               ]}
-              onPress={() =>
-                setSelectedMeter(
-                  meter.label
-                )
-              }
+              onPress={() => setSelectedMeter(meter.label)}
             >
-
+              <Gauge
+                size={20}
+                color={selectedMeter === meter.label ? '#ffffff' : '#7fb343'}
+                style={{ marginBottom: 6 }}
+              />
               <Text
                 style={[
                   styles.meterButtonText,
-                  selectedMeter === meter.label && {
-                    color: '#ffffff'
-                  }
+                  selectedMeter === meter.label && { color: '#ffffff' }
                 ]}
               >
                 {meter.label}
               </Text>
-
             </TouchableOpacity>
-
           ))}
-
         </View>
 
-        {testStage !== 'preExchange' && (
-
-          <View style={styles.card}>
-
-            <Text style={styles.sectionTitle}>
-              Meter Exchange
-            </Text>
-
-            <View style={styles.infoCard}>
-
-              <Text style={styles.infoText}>
-                Existing Meter: {existingMeter}
-              </Text>
-
-              <Text style={styles.infoText}>
-                Pre-Exchange Installation Volume:
-                {' '}
-                {preExchangeIV.toFixed(4)} m³
-              </Text>
-
+        {/* EXISTING INSTALLATION VOLUME — remains in place after the exchange */}
+        <View style={styles.card}>
+            <View style={styles.sectionHeader}>
+              <Gauge
+                size={22}
+                color="#7fb343"
+                style={{ marginRight: 10 }}
+              />
+              <Text style={styles.sectionTitle}>Installation Volume</Text>
             </View>
 
-            <Text style={styles.sectionTitle}>
-              New Meter
-            </Text>
+            <View style={styles.breakdownRow}>
+              <Text style={styles.breakdownLabel}>Pipework</Text>
+              <Text style={styles.breakdownValue}>
+                {pipeworkIV.toFixed(4)} m³
+              </Text>
+            </View>
 
-            {meters.map(meter => (
+            <View style={styles.breakdownRow}>
+              <Text style={styles.breakdownLabel}>Meter</Text>
+              <Text style={styles.breakdownValue}>
+                {meterIV.toFixed(4)} m³
+              </Text>
+            </View>
 
-              <TouchableOpacity
-                key={meter.label}
-                style={[
-                  styles.meterButton,
-                  newMeter === meter.label &&
-                  styles.selectedMeterButton
-                ]}
-                onPress={() =>
-                  setNewMeter(meter.label)
-                }
-              >
+            <View style={styles.totalCard}>
+              <Text style={styles.totalCardLabel}>
+                TOTAL INSTALLATION VOLUME
+              </Text>
+              <Text style={styles.totalCardValue}>
+                {iv.toFixed(4)}
+              </Text>
+              <Text style={styles.totalCardUnit}>m³</Text>
+            </View>
 
+            <View style={styles.purgeCard}>
+              <Text style={styles.purgeCardLabel}>PURGE VOLUME REQUIRED</Text>
+              <Text style={styles.purgeCardValue}>
+                {purgeVolume.toFixed(4)}
+              </Text>
+              <Text style={styles.purgeCardUnit}>m³</Text>
+            </View>
+
+            <View style={styles.permissibleCard}>
+              <Text style={styles.permissibleTitle}>Permissible Movement</Text>
+
+              <Text style={styles.permissibleWarning}>
+                {gaugeType === 'Fluid'
+                  ? 'Perceptible movement threshold: 0.25 mbar'
+                  : 'Perceptible movement threshold: 0.20 mbar'}
+              </Text>
+
+              {preMatchingBand ? (
                 <Text
                   style={[
-                    styles.meterButtonText,
-                    newMeter === meter.label && {
-                      color: '#ffffff'
-                    }
+                    styles.permissibleValue,
+                    preExchangeResult === 'PRE-EXCHANGE TEST SATISFACTORY'
+                      ? styles.permissiblePass
+                      : preExchangeResult === 'RETEST REQUIRED'
+                        ? styles.permissibleRetest
+                        : styles.permissibleFail
                   ]}
                 >
-                  {meter.label}
+                  IV permissible pressure drop: {preMatchingBand.allowableDrop} mbar
                 </Text>
+              ) : (
+                <Text style={styles.permissibleWarning}>
+                  IV outside supported range
+                </Text>
+              )}
 
-              </TouchableOpacity>
+              <Text style={styles.permissibleHint}>
+                At or below the threshold = no perceptible movement. Above the threshold, the IV-based permissible limit applies.
+              </Text>
+            </View>
+          </View>
 
-            ))}
+        {/* GAUGE TYPE */}
+        <View style={styles.card}>
+          <View style={styles.sectionHeader}>
+            <Gauge size={22} color="#7fb343" style={{ marginRight: 10 }} />
+            <Text style={styles.sectionTitle}>Gauge Type</Text>
+          </View>
 
-            <Text
+          <View style={styles.gaugeContainer}>
+            <TouchableOpacity
               style={[
-                styles.sectionTitle,
-                { marginTop: 20 }
+                styles.gaugeButton,
+                gaugeType === 'Fluid' && styles.selectedGaugeButton
               ]}
+              onPress={() => setGaugeType('Fluid')}
             >
-              New Pipework Installed
-            </Text>
+              <Text
+                style={[
+                  styles.gaugeButtonText,
+                  gaugeType === 'Fluid' && { color: '#ffffff' }
+                ]}
+              >
+                Fluid Gauge
+              </Text>
+            </TouchableOpacity>
 
-            <Text style={styles.pipeworkNote}>
-              Add only pipework installed during the meter exchange.
-            </Text>
+            <TouchableOpacity
+              style={[
+                styles.gaugeButton,
+                gaugeType === 'Electronic' && styles.selectedGaugeButton
+              ]}
+              onPress={() => setGaugeType('Electronic')}
+            >
+              <Text
+                style={[
+                  styles.gaugeButtonText,
+                  gaugeType === 'Electronic' && { color: '#ffffff' }
+                ]}
+              >
+                Electronic 1dp
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
-            {newPipeSegments.map(
-              (segment, index) => (
+        {/* PRE-EXCHANGE TEST */}
+        <View style={styles.card}>
+            <View style={styles.sectionHeader}>
+              <Flame
+                size={22}
+                color="#7fb343"
+                style={{ marginRight: 10 }}
+              />
+              <Text style={styles.pressureLabel}>
+                {preExchangeResult
+                  ? 'Pre-Exchange Tightness Test — Recorded'
+                  : 'Pre-Exchange Tightness Test'}
+              </Text>
+            </View>
 
-                <View
-                  key={segment.id}
-                  style={styles.segmentRowCompact}
+            <View style={styles.pressureInputContainer}>
+              <TextInput
+                placeholder="0.0"
+                value={preExchangePressureDrop}
+                onChangeText={setPreExchangePressureDrop}
+                editable={!preExchangeResult}
+                style={styles.pressureInput}
+                keyboardType="numeric"
+                placeholderTextColor="#9ca3af"
+              />
+              <Text style={styles.pressureUnit}>mbar</Text>
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.calculateButton,
+                preExchangeResult && { opacity: 0.55 }
+              ]}
+              disabled={!!preExchangeResult}
+              onPress={runAssessment}
+            >
+              <Text style={styles.calculateButtonText}>
+                {preExchangeResult
+                  ? 'Pre-Exchange Test Recorded'
+                  : 'Record Pre-Exchange Test'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+        {/* PRE-EXCHANGE RESULT */}
+        {preExchangeResult !== '' &&
+          renderResultCard(
+            preExchangeResult,
+            preExchangeActions,
+            preExchangeAllowableDrop,
+            preExchangeBandText
+          )}
+
+        {/* PROCEED TO METER EXCHANGE */}
+        {preExchangeResult === 'PRE-EXCHANGE TEST SATISFACTORY' &&
+          !exchangeStarted && (
+            <TouchableOpacity
+              style={styles.calculateButton}
+              onPress={() => {
+                setExchangeStarted(true)
+                setMeterExchanged(true)
+                setNewMeter('')
+                setNewPipeSegments([
+                  {
+                    id: Date.now().toString(),
+                    material: 'Copper',
+                    diameter: '15mm',
+                    length: ''
+                  }
+                ])
+                setPostExchangePressureDrop('')
+                setResult('')
+                setActions([])
+                setAllowableDrop(0)
+                setBandText('')
+                // Stay on the pre-exchange stage until the new meter is selected.
+                setTestStage('preExchange')
+              }}
+            >
+              <Text style={styles.calculateButtonText}>
+                Proceed to Meter Exchange
+              </Text>
+            </TouchableOpacity>
+          )}
+
+        {/* METER EXCHANGE AND POST-EXCHANGE WORKFLOW */}
+        {exchangeStarted && meterExchanged && (
+          <>
+            <View style={styles.card}>
+              <View style={styles.sectionHeader}>
+                <RefreshCw size={22} color="#7fb343" style={{ marginRight: 10 }} />
+                <Text style={styles.sectionTitle}>Meter Exchange</Text>
+              </View>
+
+              <View style={styles.infoCard}>
+                <Text style={styles.infoText}>
+                  Pre-Exchange Test: {preExchangeResult === 'PRE-EXCHANGE TEST SATISFACTORY' ? 'SATISFACTORY' : preExchangeResult}
+                </Text>
+                <Text style={styles.infoText}>
+                  Recorded Pressure Drop: {preExchangePressureDrop || '0.0'} mbar
+                </Text>
+                <Text style={styles.infoText}>
+                  Existing Meter: {existingMeter}
+                </Text>
+                <Text style={styles.infoText}>
+                  Pre-Exchange Installation Volume:{' '}
+                  {preExchangeIV.toFixed(4)} m³
+                </Text>
+              </View>
+
+              <View style={[styles.sectionHeader, { marginTop: 4 }]}>
+                <Gauge size={22} color="#7fb343" style={{ marginRight: 10 }} />
+                <Text style={styles.sectionTitle}>New Meter</Text>
+              </View>
+
+              {meters.map(meter => (
+                <TouchableOpacity
+                  key={meter.label}
+                  style={[
+                    styles.meterButton,
+                    newMeter === meter.label && styles.selectedMeterButton
+                  ]}
+                  onPress={() => {
+                    setNewMeter(meter.label)
+                    setTestStage('postExchange')
+                  }}
                 >
+                  <Gauge
+                    size={20}
+                    color={newMeter === meter.label ? '#ffffff' : '#7fb343'}
+                    style={{ marginBottom: 6 }}
+                  />
+                  <Text
+                    style={[
+                      styles.meterButtonText,
+                      newMeter === meter.label && { color: '#ffffff' }
+                    ]}
+                  >
+                    {meter.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
 
+              <View style={[styles.sectionHeader, { marginTop: 20 }]}>
+                <Wrench size={22} color="#7fb343" style={{ marginRight: 10 }} />
+                <Text style={styles.sectionTitle}>New Pipework Installed</Text>
+              </View>
+
+              <Text style={styles.pipeworkNote}>
+                Add only pipework installed during the meter exchange.
+              </Text>
+
+              {newPipeSegments.map((segment, index) => (
+                <View key={segment.id} style={styles.segmentRowCompact}>
                   <View style={styles.segmentTopRow}>
-
                     <Picker
                       selectedValue={segment.material}
                       style={styles.materialPicker}
                       mode="dropdown"
                       dropdownIconColor="#ffffff"
                       onValueChange={value => {
-
-                        const updated =
-                          [...newPipeSegments]
-
+                        const updated = [...newPipeSegments]
                         updated[index] = {
                           ...updated[index],
                           material: value,
-                          diameter:
-                            value === 'Copper'
-                              ? '15mm'
-                              : '½"'
+                          diameter: value === 'Copper' ? '15mm' : '½"'
                         }
-
                         setNewPipeSegments(updated)
                       }}
                     >
-
-                      <Picker.Item
-                        label="Copper"
-                        value="Copper"
-                      />
-
-                      <Picker.Item
-                        label="Steel"
-                        value="Steel"
-                      />
-
+                      <Picker.Item label="Copper" value="Copper" />
+                      <Picker.Item label="Steel" value="Steel" />
                     </Picker>
 
                     <Picker
@@ -1101,44 +1400,26 @@ setPreExchangeIV(0)
                       mode="dropdown"
                       dropdownIconColor="#ffffff"
                       onValueChange={value =>
-                        updateNewPipeSegment(
-                          index,
-                          'diameter',
-                          value
-                        )
+                        updateNewPipeSegment(index, 'diameter', value)
                       }
                     >
-
                       {pipeSizes
-                        .filter(
-                          pipe =>
-                            pipe.material ===
-                            segment.material
-                        )
+                        .filter(pipe => pipe.material === segment.material)
                         .map(pipe => (
-
                           <Picker.Item
                             key={pipe.label}
                             label={pipe.label}
                             value={pipe.label}
                           />
-
                         ))}
-
                     </Picker>
-
                   </View>
 
                   <View style={styles.segmentBottomRow}>
-
                     <TextInput
                       value={segment.length}
                       onChangeText={text =>
-                        updateNewPipeSegment(
-                          index,
-                          'length',
-                          text
-                        )
+                        updateNewPipeSegment(index, 'length', text)
                       }
                       style={styles.lengthInputFull}
                       placeholder="Length (m)"
@@ -1149,659 +1430,234 @@ setPreExchangeIV(0)
                     <TouchableOpacity
                       style={styles.removeCompact}
                       onPress={() => {
-
-                        const updated =
-                          newPipeSegments.filter(
-                            (_, pipeIndex) =>
-                              pipeIndex !== index
-                          )
-
+                        const updated = newPipeSegments.filter(
+                          (_, pipeIndex) => pipeIndex !== index
+                        )
                         setNewPipeSegments(updated)
                       }}
                     >
-
-                      <Text style={styles.removeCompactText}>
-                        ✕
-                      </Text>
-
+                      <Text style={styles.removeCompactText}>✕</Text>
                     </TouchableOpacity>
-
                   </View>
+                </View>
+              ))}
 
+              <TouchableOpacity
+                style={styles.addButton}
+                onPress={addNewPipeSegment}
+              >
+                <Text style={styles.addButtonText}>
+                  Add New Pipe Segment
+                </Text>
+              </TouchableOpacity>
+
+              <View style={styles.totalCard}>
+                <Text style={styles.totalCardLabel}>
+                  POST-EXCHANGE INSTALLATION VOLUME
+                </Text>
+                <Text style={styles.totalCardValue}>
+                  {postExchangeIV.toFixed(4)}
+                </Text>
+                <Text style={styles.totalCardUnit}>m³</Text>
+              </View>
+
+              <View style={styles.purgeCard}>
+                <Text style={styles.purgeCardLabel}>
+                  POST-EXCHANGE PURGE VOLUME
+                </Text>
+                <Text style={styles.purgeCardValue}>
+                  {postExchangePurgeVolume.toFixed(4)}
+                </Text>
+                <Text style={styles.purgeCardUnit}>m³</Text>
+              </View>
+            </View>
+
+            {testStage === 'postExchange' && (
+              <View style={styles.card}>
+                <View style={styles.sectionHeader}>
+                  <Flame
+                    size={22}
+                    color="#7fb343"
+                    style={{ marginRight: 10 }}
+                  />
+                  <Text style={styles.pressureLabel}>
+                    Post-Exchange Tightness Test
+                  </Text>
                 </View>
 
-              )
+              <View style={styles.pressureInputContainer}>
+                <TextInput
+                  placeholder="0.0"
+                  value={postExchangePressureDrop}
+                  onChangeText={setPostExchangePressureDrop}
+                  style={styles.pressureInput}
+                  keyboardType="numeric"
+                  placeholderTextColor="#9ca3af"
+                />
+                <Text style={styles.pressureUnit}>mbar</Text>
+              </View>
+
+              <TouchableOpacity
+                style={styles.calculateButton}
+                onPress={runAssessment}
+              >
+                <Text style={styles.calculateButtonText}>
+                  Run Post-Exchange Assessment
+                </Text>
+                </TouchableOpacity>
+              </View>
             )}
-
-            <TouchableOpacity
-              style={styles.addButton}
-              onPress={addNewPipeSegment}
-            >
-
-              <Text style={styles.addButtonText}>
-                Add New Pipe Segment
-              </Text>
-
-            </TouchableOpacity>
-
-            <View style={styles.totalCard}>
-
-              <Text style={styles.totalCardLabel}>
-                POST-EXCHANGE INSTALLATION VOLUME
-              </Text>
-
-              <Text style={styles.totalCardValue}>
-                {postExchangeIV.toFixed(4)}
-              </Text>
-
-              <Text style={styles.totalCardUnit}>
-                m³
-              </Text>
-
-            </View>
-
-            <View style={styles.purgeCard}>
-
-              <Text style={styles.purgeCardLabel}>
-                POST-EXCHANGE PURGE VOLUME
-              </Text>
-
-              <Text style={styles.purgeCardValue}>
-                {postExchangePurgeVolume.toFixed(4)}
-              </Text>
-
-              <Text style={styles.purgeCardUnit}>
-                m³
-              </Text>
-
-            </View>
-
-          </View>
-
+          </>
         )}
 
-          <View style={styles.cardInner}>
+        {/* POST-EXCHANGE RESULT */}
+        {exchangeStarted &&
+          meterExchanged &&
+          testStage === 'postExchange' &&
+          result !== '' &&
+          renderResultCard(
+            result,
+            actions,
+            allowableDrop,
+            bandText
+          )}
 
+        {/* PIPEWORK-ONLY RETEST */}
+        {exchangeStarted &&
+          testStage === 'postExchange' &&
+          result === 'RETEST REQUIRED' && (
+            <TouchableOpacity
+              style={styles.retestButton}
+              onPress={() => {
+                setTestStage('pipeworkRetest')
+                setPipeworkRetestPressureDrop('')
+                setResult('')
+                setActions([])
+                setAllowableDrop(0)
+                setBandText('')
+              }}
+            >
+              <Text style={styles.retestButtonText}>
+                Start Pipework-Only Retest
+              </Text>
+            </TouchableOpacity>
+          )}
+
+        {exchangeStarted && testStage === 'pipeworkRetest' && (
+          <View style={styles.card}>
             <View style={styles.sectionHeader}>
-
-              <Gauge
+              <Flame
                 size={22}
                 color="#7fb343"
                 style={{ marginRight: 10 }}
               />
-
-              <Text style={styles.sectionTitle}>
-                Installation Volume
+              <Text style={styles.pressureLabel}>
+                Pipework-Only Tightness Test
               </Text>
-
             </View>
 
-            {testStage === 'preExchange' ? (
-
-              <>
-                <View style={styles.breakdownRow}>
-
-                  <Text style={styles.breakdownLabel}>
-                    Pipework
-                  </Text>
-
-                  <Text style={styles.breakdownValue}>
-                    {pipeworkIV.toFixed(4)} m³
-                  </Text>
-
-                </View>
-
-                <View style={styles.breakdownRow}>
-
-                  <Text style={styles.breakdownLabel}>
-                    Meter
-                  </Text>
-
-                  <Text style={styles.breakdownValue}>
-                    {meterIV.toFixed(4)} m³
-                  </Text>
-
-                </View>
-              </>
-
-            ) : (
-
-              <>
-                <View style={styles.breakdownRow}>
-
-                  <Text style={styles.breakdownLabel}>
-                    Existing Pipework
-                  </Text>
-
-                  <Text style={styles.breakdownValue}>
-                    {pipeworkIV.toFixed(4)} m³
-                  </Text>
-
-                </View>
-
-                <View style={styles.breakdownRow}>
-
-                  <Text style={styles.breakdownLabel}>
-                    New Pipework
-                  </Text>
-
-                  <Text style={styles.breakdownValue}>
-                    {newPipeworkIV.toFixed(4)} m³
-                  </Text>
-
-                </View>
-
-                <View style={styles.breakdownRow}>
-
-                  <Text style={styles.breakdownLabel}>
-                    New Meter
-                  </Text>
-
-                  <Text style={styles.breakdownValue}>
-                    {newMeterIV.toFixed(4)} m³
-                  </Text>
-
-                </View>
-              </>
-
-            )}
-
-            <View style={styles.totalCard}>
-
-              <Text style={styles.totalCardLabel}>
-                {testStage === 'preExchange'
-                  ? 'TOTAL INSTALLATION VOLUME'
-                  : 'CURRENT INSTALLATION VOLUME'}
-              </Text>
-
-              <Text style={styles.totalCardValue}>
-                {assessmentIV.toFixed(4)}
-              </Text>
-
-              <Text style={styles.totalCardUnit}>
-                m³
-              </Text>
-
+            <View style={styles.pressureInputContainer}>
+              <TextInput
+                placeholder="0.0"
+                value={pipeworkRetestPressureDrop}
+                onChangeText={setPipeworkRetestPressureDrop}
+                style={styles.pressureInput}
+                keyboardType="numeric"
+                placeholderTextColor="#9ca3af"
+              />
+              <Text style={styles.pressureUnit}>mbar</Text>
             </View>
-
-            <View style={styles.purgeCard}>
-
-              <Text style={styles.purgeCardLabel}>
-                PURGE VOLUME REQUIRED
-              </Text>
-
-              <Text style={styles.purgeCardValue}>
-                {assessmentPurgeVolume.toFixed(4)}
-              </Text>
-
-              <Text style={styles.purgeCardUnit}>
-                m³
-              </Text>
-
-            </View>
-
-          <View style={styles.permissibleCard}>
-
-  <Text style={styles.permissibleTitle}>
-    Permissible Movement
-  </Text>
-
-  {testStage === 'pipeworkRetest' ? (
-
-    <Text style={styles.permissibleWarning}>
-      Pipework-only test:
-      Maximum permissible movement is 0.25 mbar (Fluid)
-      or 0.2 mbar (Electronic)
-    </Text>
-
-  ) : (
-
-    matchingBand ? (
-
-      <Text
-        style={[
-          styles.permissibleValue,
-          result === 'PASS'
-            ? styles.permissiblePass
-            : result === 'RETEST REQUIRED'
-              ? styles.permissibleRetest
-              : styles.permissibleFail
-        ]}
-      >
-        Allowed Drop:
-        {' '}
-        {matchingBand.allowableDrop}
-        mbar
-      </Text>
-
-    ) : (
-
-      <Text style={styles.permissibleWarning}>
-        IV outside supported range
-      </Text>
-
-    )
-
-  )}
-
-</View>
-
-</View>
-
-          <Text style={styles.sectionTitle}>
-            Gauge Type
-          </Text>
-
-          <View style={styles.gaugeContainer}>
 
             <TouchableOpacity
-              style={[
-                styles.gaugeButton,
-                gaugeType === 'Fluid' &&
-                styles.selectedGaugeButton
-              ]}
-              onPress={() =>
-                setGaugeType('Fluid')
-              }
+              style={styles.calculateButton}
+              onPress={runAssessment}
             >
-
-              <Text
-                style={[
-                  styles.gaugeButtonText,
-                  gaugeType === 'Fluid' && {
-                    color: '#ffffff'
-                  }
-                ]}
-              >
-                Fluid Gauge
+              <Text style={styles.calculateButtonText}>
+                Run Pipework-Only Test
               </Text>
-
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.gaugeButton,
-                gaugeType === 'Electronic' &&
-                styles.selectedGaugeButton
-              ]}
-              onPress={() =>
-                setGaugeType('Electronic')
-              }
-            >
-
-              <Text
-                style={[
-                  styles.gaugeButtonText,
-                  gaugeType === 'Electronic' && {
-                    color: '#ffffff'
-                  }
-                ]}
-              >
-                Electronic 1dp
-              </Text>
-
-            </TouchableOpacity>
-
           </View>
+        )}
 
-        <View style={styles.card}>
+        {exchangeStarted &&
+          testStage === 'pipeworkRetest' &&
+          result !== '' &&
+          renderResultCard(
+            result,
+            actions,
+            allowableDrop,
+            bandText
+          )}
 
-          <View style={styles.sectionHeader}>
-
-  <Flame
-    size={22}
-    color="#7fb343"
-    style={{ marginRight: 10 }}
-  />
-
-  <Text style={styles.pressureLabel}>
-
-  {testStage === 'preExchange'
-    ? 'Pre-Exchange Tightness Test'
-    : testStage === 'postExchange'
-      ? 'Post-Exchange Tightness Test'
-      : testStage === 'pipeworkRetest'
-        ? 'Pipework-Only Tightness Test'
-        : 'Final Tightness Test'}
-
-</Text>
-
-</View>
-
-<View style={styles.pressureInputContainer}>
-
-  <TextInput
-  placeholder="0.0"
-
-  value={
-    testStage === 'preExchange'
-      ? preExchangePressureDrop
-      : testStage === 'postExchange'
-        ? postExchangePressureDrop
-        : testStage === 'pipeworkRetest'
-          ? pipeworkRetestPressureDrop
-          : finalTestPressureDrop
-  }
-
-  onChangeText={text => {
-
-    if (testStage === 'preExchange') {
-      setPreExchangePressureDrop(text)
-    }
-
-    if (testStage === 'postExchange') {
-      setPostExchangePressureDrop(text)
-    }
-
-    if (testStage === 'pipeworkRetest') {
-      setPipeworkRetestPressureDrop(text)
-    }
-
-    if (testStage === 'finalTest') {
-      setFinalTestPressureDrop(text)
-    }
-
-  }}
-
-  style={styles.pressureInput}
-
-  keyboardType="numeric"
-
-  placeholderTextColor="#9ca3af"
-/>
-
-  <Text style={styles.pressureUnit}>
-    mbar
-  </Text>
-
-</View>
-
+        {exchangeStarted &&
+          testStage === 'pipeworkRetest' &&
+          result === 'PASS' && (
           <TouchableOpacity
-  style={styles.calculateButton}
-  onPress={runAssessment}
->
-  <Text style={styles.calculateButtonText}>
-
-    {testStage === 'preExchange'
-      ? 'Record Pre-Exchange Test'
-      : testStage === 'postExchange'
-        ? 'Run Post-Exchange Assessment'
-        : testStage === 'pipeworkRetest'
-          ? 'Run Pipework-Only Test'
-          : 'Run Final Tightness Test'}
-
-  </Text>
-</TouchableOpacity>
-
-        </View>
-
-        {testStage === 'postExchange' &&
-  result === 'RETEST REQUIRED' && (
-
-  <TouchableOpacity
-    style={styles.retestButton}
-    onPress={() => {
-
-      setTestStage('pipeworkRetest')
-      setPipeworkRetestPressureDrop('')
-      setResult('')
-      setActions([])
-      setAllowableDrop(0)
-      setBandText('')
-
-      Alert.alert(
-        'Pipework-Only Retest',
-        'Check the meter installation and disturbed connections, isolate all appliances, then carry out the pipework-only tightness test.'
-      )
-
-    }}
-  >
-
-    <Text style={styles.retestButtonText}>
-      Start Pipework-Only Retest
-    </Text>
-
-  </TouchableOpacity>
-
-)}
-
-{testStage === 'pipeworkRetest' &&
-  result === 'PASS' && (
-
-  <TouchableOpacity
-    style={styles.calculateButton}
-    onPress={() => {
-
-      setTestStage('finalTest')
-      setFinalTestPressureDrop('')
-      setResult('')
-      setActions([])
-      setAllowableDrop(0)
-      setBandText('')
-
-    }}
-  >
-
-    <Text style={styles.calculateButtonText}>
-      Appliances Reinstated — Start Final Test
-    </Text>
-
-  </TouchableOpacity>
-
-)}
-
-{testStage === 'preExchange' &&
-  result === 'PRE-EXCHANGE TEST RECORDED' && (
-
-  <TouchableOpacity
-    style={styles.retestButton}
-    onPress={() => {
-      setMeterExchanged(true)
-      setNewMeter('')
-      setNewPipeSegments([
-        {
-          id: Date.now().toString(),
-          material: 'Copper',
-          diameter: '15mm',
-          length: ''
-        }
-      ])
-      setTestStage('postExchange')
-      setPostExchangePressureDrop('')
-      setResult('')
-      setActions([])
-      setAllowableDrop(0)
-      setBandText('')
-    }}
-  >
-    <Text style={styles.retestButtonText}>
-      Meter Exchanged — Enter New Installation Details
-    </Text>
-  </TouchableOpacity>
-
-)}
-
-        {result !== '' && (
-
-          <View
-            style={[
-
-  styles.card,
-
-  result === 'PASS'
-
-    ? styles.resultCardPass
-
-    : result === 'RETEST REQUIRED'
-
-      ? styles.resultCardRetest
-
-      : styles.resultCardFail
-
-]}
+            style={styles.calculateButton}
+            onPress={() => {
+              setTestStage('finalTest')
+              setFinalTestPressureDrop('')
+              setResult('')
+              setActions([])
+              setAllowableDrop(0)
+              setBandText('')
+            }}
           >
+            <Text style={styles.calculateButtonText}>
+              Appliances Reinstated — Start Final Test
+            </Text>
+          </TouchableOpacity>
+        )}
 
-            <View style={styles.resultHeader}>
-
-  {
-
-    result === 'PASS'
-
-      ? (
-
-        <CheckCircle2
-          size={34}
-          color="#16a34a"
-          style={{ marginRight: 10 }}
-        />
-
-      )
-
-      : result === 'RETEST REQUIRED'
-
-        ? (
-
-          <Wrench
-            size={34}
-            color="#d97706"
-            style={{ marginRight: 10 }}
-          />
-
-        )
-
-        : (
-
-          <TriangleAlert
-            size={34}
-            color="#dc2626"
-            style={{ marginRight: 10 }}
-          />
-
-        )
-
-  }
-
-  <View style={{ flex: 1, minWidth: 0 }}>
-
-    <Text
-      style={[
-
-        styles.resultText,
-
-        result === 'FAIL'
-
-          ? styles.failText
-
-          : result === 'RETEST REQUIRED'
-
-            ? styles.retestText
-
-            : styles.passText
-
-      ]}
-    >
-
-      {result}
-
-    </Text>
-
-    <View
-      style={[
-
-        styles.statusPill,
-
-        result === 'PASS'
-
-          ? styles.statusPillPass
-
-          : result === 'RETEST REQUIRED'
-
-            ? styles.statusPillRetest
-
-            : styles.statusPillFail
-
-      ]}
-    >
-
-      <Text style={styles.statusPillText}>
-
-        {
-
-          result === 'PASS'
-
-            ? 'Installation Sound'
-
-            : result === 'RETEST REQUIRED'
-
-              ? 'Retest Required'
-
-              : 'Pressure Loss Exceeds Limits'
-
-        }
-
-      </Text>
-
-    </View>
-
-  </View>
-
-</View>
-
-            {allowableDrop > 0 && (
-
-              <View style={styles.infoCard}>
-
-                <Text style={styles.infoText}>
-                  Permissible Limit: {allowableDrop} mbar
-                </Text>
-
-                <Text style={styles.infoText}>
-                  IV Band: {bandText}
-                </Text>
-
-              </View>
-
-            )}
-
-            <View style={styles.actionsCard}>
-
-              {actions.map(
-
-  (action, index) => (
-
-    <View
-      key={index}
-      style={styles.actionRow}
-    >
-
-      <View style={styles.actionIcon}>
-
-        <ChevronRight
-          size={18}
-          color="#7fb343"
-          style={{ marginRight: 10 }}
-        />
-
-      </View>
-
-      <Text style={styles.actionText}>
-        {action}
-      </Text>
-
-    </View>
-
-  )
-
-)}
-
+        {exchangeStarted && testStage === 'finalTest' && (
+          <View style={styles.card}>
+            <View style={styles.sectionHeader}>
+              <Flame
+                size={22}
+                color="#7fb343"
+                style={{ marginRight: 10 }}
+              />
+              <Text style={styles.pressureLabel}>
+                Final Tightness Test
+              </Text>
             </View>
 
-            <View style={styles.cardInner}>
+            <View style={styles.pressureInputContainer}>
+              <TextInput
+                placeholder="0.0"
+                value={finalTestPressureDrop}
+                onChangeText={setFinalTestPressureDrop}
+                style={styles.pressureInput}
+                keyboardType="numeric"
+                placeholderTextColor="#9ca3af"
+              />
+              <Text style={styles.pressureUnit}>mbar</Text>
+            </View>
 
-              <Text style={styles.sectionTitle}>
-                Notes
+            <TouchableOpacity
+              style={styles.calculateButton}
+              onPress={runAssessment}
+            >
+              <Text style={styles.calculateButtonText}>
+                Run Final Tightness Test
               </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
+        {exchangeStarted &&
+          testStage === 'finalTest' &&
+          result !== '' &&
+          renderResultCard(
+            result,
+            actions,
+            allowableDrop,
+            bandText
+          )}
+
+        {/* NOTES / SAVE / CLEAR */}
+        <>            <View style={styles.cardInner}>
+              <Text style={styles.sectionTitle}>Notes</Text>
               <TextInput
                 placeholder="Optional notes..."
                 placeholderTextColor="#9ca3af"
@@ -1810,32 +1666,23 @@ setPreExchangeIV(0)
                 style={styles.notesInput}
                 multiline
               />
-
             </View>
 
             <TouchableOpacity
               style={styles.saveButton}
               onPress={saveAssessment}
             >
-
-              <Text style={styles.saveButtonText}>
-                Save Assessment
-              </Text>
-
+              <Text style={styles.saveButtonText}>Save Test</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={styles.clearButton}
               onPress={() => {
-
                 Alert.alert(
-                  'Clear Assessment',
-                  'Reset all assessment data?',
+                  'Clear Test',
+                  'Reset all test data?',
                   [
-                    {
-                      text: 'Cancel',
-                      style: 'cancel'
-                    },
+                    { text: 'Cancel', style: 'cancel' },
                     {
                       text: 'Clear',
                       style: 'destructive',
@@ -1843,24 +1690,14 @@ setPreExchangeIV(0)
                     }
                   ]
                 )
-
               }}
             >
-
-              <Text style={styles.clearButtonText}>
-                Clear Assessment
-              </Text>
-
+              <Text style={styles.clearButtonText}>Clear Test</Text>
             </TouchableOpacity>
-
-          </View>
-
-        )}
+        </>
 
       </ScrollView>
-
     </SafeAreaView>
-
   )
 
 }
@@ -1898,7 +1735,7 @@ const styles = StyleSheet.create({
 
   paddingHorizontal: 0,
 
-  marginBottom: -30,
+  marginBottom: 0,
 
   overflow: 'hidden'
 
@@ -2443,6 +2280,13 @@ permissibleWarning: {
   fontWeight: '700',
   color: '#dc2626',
   lineHeight: 22
+},
+
+permissibleHint: {
+  fontSize: 12,
+  color: '#9ca3af',
+  lineHeight: 18,
+  marginTop: 8
 },
 
 resultCardPass: {

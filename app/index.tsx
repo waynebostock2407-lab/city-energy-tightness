@@ -100,24 +100,18 @@ export default function HomeScreen() {
       >
 
         <View style={styles.header}>
-
   <Image
-
     source={
       require('../assets/images/IVAssistHeader.png')
     }
-
     style={styles.brandHeader}
-
     resizeMode="cover"
-
   />
-
 </View>
 
-        <View style={styles.headerAccent} />
+<View style={styles.headerSpacer} />
 
-        <View style={styles.card}>
+<View style={styles.card}>
 
           <View style={styles.sectionHeader}>
 
@@ -319,7 +313,7 @@ const styles = StyleSheet.create({
 
   paddingHorizontal: 0,
 
-  marginBottom: -75,
+  marginBottom: 0,
 
   overflow: 'hidden'
 
@@ -575,18 +569,8 @@ actionCardText: {
 
   },
 
-  headerAccent: {
-
-  width: 80,
-
-  height: 4,
-
-  borderRadius: 2,
-
-  backgroundColor: '#0f1720',
-
-  marginTop: 18
-
+  headerSpacer: {
+  height: 24
 },
 
 brandHeader: {
